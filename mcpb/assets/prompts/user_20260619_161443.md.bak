@@ -1,0 +1,488 @@
+# wasm-mcp — User Guide
+
+**Server:** wasm-mcp v0.1.0
+**Description:** WebAssembly sandbox execution for MCP — inspect, call, and run WASM modules.
+**Transport:** stdio (default) or HTTP (set `MCP_TRANSPORT=http`).
+
+---
+
+## Installation
+
+### Prerequisites
+
+- **Python 3.10+** with `uv` package manager
+- A WebAssembly module to test with (or compile one from C/Rust)
+
+### Setup Steps
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/sandraschi/wasm-mcp.git
+cd wasm-mcp
+
+# 2. Create virtual environment and install dependencies
+uv venv
+uv sync
+
+# 3. Start the MCP server (stdio mode)
+uv run python -m wasm_mcp
+
+# 4. (Alternative) HTTP mode
+set MCP_TRANSPORT=http
+uv run python -m wasm_mcp
+```
+
+### Creating a Test WASM Module
+
+You need a `.wasm` file to test with. Here's how to create a simple one:
+
+**Using the Wat2Wasm tool (recommended for quick testing):**
+
+Create `add.wat`:
+```wat
+(module
+  (func $add (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add)
+  (export "add" (func $add))
+)
+```
+
+Compile it:
+```bash
+wat2wasm add.wat -o add.wasm
+```
+
+**Using Rust:**
+```rust
+#[no_mangle]
+pub extern "C" fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+```
+```bash
+rustc --target wasm32-unknown-unknown -O -o add.wasm add.rs
+```
+
+**Using C with Clang:**
+```bash
+clang --target=wasm32-unknown-unknown -nostdlib -Wl,--export-all -o add.wasm add.c
+```
+
+### Claude Desktop Configuration
+
+```json
+{
+  "mcpServers": {
+    "wasm-mcp": {
+      "command": "uv",
+      "args": ["run", "--directory", "C:/path/to/wasm-mcp", "python", "-m", "wasm_mcp"]
+    }
+  }
+}
+```
+
+---
+
+## Step-by-Step Tutorials
+
+### Tutorial 1: Inspect a Simple Math Module
+
+**Goal:** Discover what functions a `math.wasm` module exports before calling them.
+
+**Prerequisite:** Create a WASM module with `add`, `subtract`, and `multiply` functions.
+
+**Tool Call:**
+```
+wasm_inspect(path="C:/wasm_modules/math.wasm")
+```
+
+**Return Value:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm_modules/math.wasm",
+  "exports": [
+    {"name": "add", "kind": "Func"},
+    {"name": "subtract", "kind": "Func"},
+    {"name": "multiply", "kind": "Func"},
+    {"name": "memory", "kind": "Memory"}
+  ],
+  "imports": []
+}
+```
+
+**What happened:** The tool loaded the WASM module, instantiated it successfully, and listed 3 exported functions and 1 memory export. The import list is empty — this module does not require any host functions.
+
+---
+
+### Tutorial 2: Call an Addition Function
+
+**Goal:** Call the `add` export with two integer arguments.
+
+**Tool Call:**
+```
+wasm_call(
+  path="C:/wasm_modules/math.wasm",
+  export_name="add",
+  args_json="[5, 3]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm_modules/math.wasm",
+  "export": "add",
+  "result": 8
+}
+```
+
+**What happened:** The module was loaded, instantiated, and the `add` function was called with arguments `5` and `3`. The function returned `8`, which matches `5 + 3`.
+
+---
+
+### Tutorial 3: Call with Floating-Point Arguments
+
+**Goal:** Call a function that computes the hypotenuse using f32 arguments.
+
+**Prerequisite:** A WASM module with `hypot(f32, f32) -> f32`.
+
+**Tool Call:**
+```
+wasm_call(
+  path="C:/wasm_modules/trig.wasm",
+  export_name="hypot",
+  args_json="[3.0, 4.0]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm_modules/trig.wasm",
+  "export": "hypot",
+  "result": 5.0
+}
+```
+
+**What happened:** The function computed sqrt(3^2 + 4^2) = sqrt(25) = 5.0. Float arguments are passed naturally in the JSON array and converted to f32 by Wasmtime.
+
+---
+
+### Tutorial 4: Call a Void Function
+
+**Goal:** Call a function that writes to WASM memory and returns nothing.
+
+**Tool Call:**
+```
+wasm_call(
+  path="C:/wasm_modules/store.wasm",
+  export_name="store_value",
+  args_json="[42]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm_modules/store.wasm",
+  "export": "store_value",
+  "result": null
+}
+```
+
+**What happened:** The function was called successfully with argument 42. Since the function has no return value (void), `result` is `null`. The value was written to WASM linear memory, but wasm-mcp does not provide a way to read memory back.
+
+---
+
+### Tutorial 5: Inspect a Module that Requires Imports
+
+**Goal:** Inspect a WASM module that needs host functions (e.g., WASI or imported JS functions).
+
+**Tool Call:**
+```
+wasm_inspect(path="C:/wasm_modules/wasi_hello.wasm")
+```
+
+**Return Value:**
+```json
+{
+  "ok": false,
+  "error": "module requires at least 1 import",
+  "exports": [],
+  "imports": ["Module requires imports; list not available without instantiating."]
+}
+```
+
+**What happened:** The module could not be instantiated because it requires imports (likely `wasi_snapshot_preview1` functions). wasm-mcp does not provide any host imports, so the module cannot run. You need to either:
+- Modify the module to not use WASI/system imports
+- Or use a different WASM runtime that provides the required imports
+
+---
+
+### Tutorial 6: Handle Export Not Found Error
+
+**Goal:** Attempt to call a nonexistent export and see the error handling.
+
+**Tool Call:**
+```
+wasm_call(
+  path="C:/wasm_modules/math.wasm",
+  export_name="nonexistent",
+  args_json="[]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": false,
+  "error": "Export not found: nonexistent. Available: ['add', 'subtract', 'multiply', 'memory']",
+  "result": null
+}
+```
+
+**What happened:** The module was loaded successfully but the export name did not match any available export. The error message includes a list of valid exports so you can correct the call.
+
+---
+
+### Tutorial 7: Run a Module with _start Entry Point
+
+**Goal:** Execute a WASM module using the WASI-style `_start` entry point.
+
+**Tool Call:**
+```
+wasm_run(
+  path="C:/wasm_modules/hello.wasm",
+  entry_export="_start"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm_modules/hello.wasm",
+  "export": "_start",
+  "result": null
+}
+```
+
+**What happened:** The `_start` function was called. This is the convention used by WASI modules for initialization. The function ran to completion and returned `null` (void). Note: WASI modules that attempt to use stdin/stdout/stderr may trap since wasm-mcp does not provide WASI support.
+
+---
+
+### Tutorial 8: Run with Custom Entry Point
+
+**Goal:** Execute a WASM module that uses `main` instead of `_start`.
+
+**Tool Call:**
+```
+wasm_run(
+  path="C:/wasm_modules/calc.wasm",
+  entry_export="main",
+  args_json="[0]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm_modules/calc.wasm",
+  "export": "main",
+  "result": 0
+}
+```
+
+**What happened:** The module's `main` function was called with argument `0`. It returned `0`, indicating successful execution (exit code convention).
+
+---
+
+### Tutorial 9: Invalid JSON Args Error
+
+**Goal:** Pass malformed JSON as arguments and observe the error recovery.
+
+**Tool Call:**
+```
+wasm_call(
+  path="C:/wasm_modules/math.wasm",
+  export_name="add",
+  args_json="[1, two]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": false,
+  "error": "Invalid args JSON: Expecting value: line 1 column 5 (char 4)",
+  "result": null
+}
+```
+
+**What happened:** The JSON parser rejected `"two"` as an invalid JSON value. Always use numeric literals in the JSON array (e.g., `[1, 2]` or `[3.14]`).
+
+---
+
+### Tutorial 10: Function Returning Multiple Values
+
+**Goal:** Call a WASM function that returns multiple i32 values (multi-value return).
+
+**Tool Call:**
+```
+wasm_call(
+  path="C:/wasm_modules/multi_return.wasm",
+  export_name="divide",
+  args_json="[10, 3]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm_modules/multi_return.wasm",
+  "export": "divide",
+  "result": [3, 1]
+}
+```
+
+**What happened:** The `divide` function returned both quotient (3) and remainder (1) as a tuple. Wasmtime multi-value returns are converted to a JSON array automatically.
+
+---
+
+### Tutorial 11: Function with Many Arguments
+
+**Goal:** Call a function that takes 5 arguments (e.g., dot product of 2D vectors).
+
+**Tool Call:**
+```
+wasm_call(
+  path="C:/wasm_modules/vector.wasm",
+  export_name="dot_product_2d",
+  args_json="[1, 2, 3, 4, 5]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm_modules/vector.wasm",
+  "export": "dot_product_2d",
+  "result": 26
+}
+```
+
+**What happened:** The function received `[1, 2, 3, 4, 5]` and computed `1*3 + 2*4 + 5 = 3 + 8 + 5 = 26`. Arguments beyond pairs are handled as named parameters.
+
+---
+
+### Tutorial 12: Test Runtime Trap
+
+**Goal:** Call a function that triggers a WASM runtime trap (division by zero) and observe graceful failure.
+
+**Tool Call:**
+```
+wasm_call(
+  path="C:/wasm_modules/math.wasm",
+  export_name="divide",
+  args_json="[5, 0]"
+)
+```
+
+**Return Value:**
+```json
+{
+  "ok": false,
+  "error": "wasm trap: wasm `unreachable` instruction executed",
+  "result": null
+}
+```
+
+**What happened:** Division by zero in WASM triggers a trap (unreachable instruction). Wasmtime catches the trap safely and returns the error message. The server does not crash — it handles the error gracefully and returns a clean error dict.
+
+---
+
+## REST API Reference
+
+wasm-mcp does not expose any custom REST endpoints. All interaction is through the MCP tool interface.
+
+When running in HTTP mode (`MCP_TRANSPORT=http`), the server listens on `http://localhost:8000` and provides the standard MCP SSE transport:
+
+- `GET /sse` — SSE endpoint for receiving MCP events
+- `POST /messages?session_id=<id>` — POST messages for MCP tool calls
+
+## Troubleshooting
+
+### 1. "WASM file not found"
+
+**Problem:** The path does not point to a valid WASM file.
+
+**Solution:** Verify the file exists at the specified path. Use an absolute path if running from a different working directory. WASM files typically have the `.wasm` extension.
+
+### 2. "module requires at least 1 import"
+
+**Problem:** The WASM module requires host-provided functions (imports).
+
+**Solution:** wasm-mcp does not provide any host imports. You need to either:
+- Use a WASM module that does not require imports
+- Use a different WASM runtime (not wasm-mcp) that can provide the required imports
+
+### 3. "Export not found"
+
+**Problem:** The named export does not exist in the module.
+
+**Solution:** Run `wasm_inspect` first to discover the correct export names. The error message lists all available exports.
+
+### 4. "Invalid args JSON"
+
+**Problem:** The `args_json` string is malformed JSON or contains non-numeric values.
+
+**Solution:** Ensure the string is valid JSON containing only numbers. Examples of valid args_json: `"[]"`, `"[1]"`, `"[1, 2]"`, `"[3.14, 2.718]"`. Use a JSON validator if unsure.
+
+### 5. "wasm trap: unreachable instruction"
+
+**Problem:** The WASM function hit a runtime error (division by zero, out-of-bounds memory access, etc.).
+
+**Solution:** Review the function's preconditions. Ensure arguments are within valid ranges. This is a runtime error, not a configuration issue.
+
+## FAQ
+
+### 1. What WASM runtimes does wasm-mcp use?
+
+It uses Wasmtime via the `wasmtime-py` Python package. Wasmtime is a fast, secure, standards-compliant WASM runtime developed by the Bytecode Alliance.
+
+### 2. Can I use WASI (WebAssembly System Interface)?
+
+No. wasm-mcp does not provide any WASI imports. Modules that require WASI will fail to instantiate. This is by design for security isolation.
+
+### 3. What file formats are supported?
+
+`.wasm` (WebAssembly binary format) and `.wat` (WebAssembly text format). The Wasmtime engine will parse both.
+
+### 4. How do I pass string arguments?
+
+WASM functions operate on numeric types (i32, i64, f32, f64). Strings must be passed as memory addresses (i32 pointer + i32 length). wasm-mcp does not handle string marshaling — use numeric arguments only.
+
+### 5. Does wasm-mcp persist state between calls?
+
+No. Each tool invocation creates a fresh Wasmtime `Store` and `Instance`. No WASM state is shared between calls. This ensures isolation but means global variables in WASM are reset every call.
+
+### 6. Can I read WASM linear memory?
+
+Wasm-mcp does not expose memory reading tools. Memory inspection is limited to what the WASM module exposes via exported functions.
+
+### 7. What MCP clients are supported?
+
+Any client that supports the MCP stdio or HTTP/SSE transport: Claude Desktop, Cursor, VS Code (via extensions), and custom MCP hosts.
+
+### 8. How do I compile my own WASM modules?
+
+You can compile to WASM from C (via Clang/LLVM), Rust, Go, AssemblyScript, and many other languages. Ensure modules do not rely on system imports for compatibility with wasm-mcp.

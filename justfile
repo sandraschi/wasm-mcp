@@ -1,4 +1,5 @@
-﻿set windows-shell := ["pwsh.exe", "-NoLogo", "-Command"]
+set windows-shell := ["powershell.exe", "-NoProfile", "-Command"]
+import 'scripts/just/fleet.just'
 
 # Fleet minimal justfile (mcp_fleet_lint_apply)
 
@@ -14,4 +15,3 @@ fix:
 	Set-Location '{{justfile_directory()}}'
 	uv run ruff check . --fix
 	uv run ruff format .
-

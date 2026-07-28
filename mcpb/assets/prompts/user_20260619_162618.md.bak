@@ -1,0 +1,416 @@
+# wasm-mcp — User Guide
+
+**Server:** wasm-mcp v0.1.0
+**Description:** WebAssembly sandbox execution for MCP — inspect, call, and run WASM modules via the Wasmtime runtime.
+**Transport:** stdio (default) or HTTP (set `MCP_TRANSPORT=http`).
+
+---
+
+## Installation
+
+### Prerequisites
+
+- **Python 3.10+** with `uv` package manager
+- A WebAssembly module to test with (compile one or create a `.wat` file)
+
+### Setup Steps
+
+```bash
+git clone https://github.com/sandraschi/wasm-mcp.git
+cd wasm-mcp
+uv venv
+uv sync
+uv run python -m wasm_mcp
+```
+
+### Creating a Test WASM Module
+
+**Wat2Wasm (easiest for testing):**
+Create `add.wat`:
+```wat
+(module
+  (func $add (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add)
+  (export "add" (func $add)))
+```
+`wat2wasm add.wat -o add.wasm`
+
+**Rust:** `rustc --target wasm32-unknown-unknown -O -o add.wasm add.rs`
+**C/Clang:** `clang --target=wasm32-unknown-unknown -nostdlib -Wl,--export-all -o add.wasm add.c`
+
+### Claude Desktop Configuration
+
+```json
+{
+  "mcpServers": {
+    "wasm-mcp": {
+      "command": "uv",
+      "args": ["run", "--directory", "C:/path/to/wasm-mcp", "python", "-m", "wasm_mcp"]
+    }
+  }
+}
+```
+
+## Step-by-Step Tutorials
+
+### Tutorial 1: Inspect a Math Module
+
+**Goal:** Use `wasm_inspect` to discover what exports a math WASM module provides before calling it.
+
+**Background:** Always inspect a module first to learn its exact export names and kinds.
+
+**Tool Call:** `wasm_inspect(path="C:/wasm/math.wasm")`
+
+**Return:**
+```json
+{
+  "ok": true,
+  "path": "C:/wasm/math.wasm",
+  "exports": [
+    {"name": "add", "kind": "Func"},
+    {"name": "subtract", "kind": "Func"},
+    {"name": "multiply", "kind": "Func"},
+    {"name": "memory", "kind": "Memory"}
+  ],
+  "imports": []
+}
+```
+
+**What happened:** The module exports 3 functions (`add`, `subtract`, `multiply`) and 1 memory. No imports required. These names can now be used with `wasm_call`.
+
+### Tutorial 2: Call an Addition Function
+
+**Goal:** Call the `add` export with two integer arguments.
+
+**Tool Call:** `wasm_call(path="C:/wasm/math.wasm", export_name="add", args_json="[5, 3]")`
+
+**Return:** `{"ok": true, "path": "C:/wasm/math.wasm", "export": "add", "result": 8}`
+
+**What happened:** The function was called with 5 and 3. It returned 8 (5 + 3).
+
+### Tutorial 3: Call with Float Arguments
+
+**Goal:** Call a hypotenuse function using f32 arguments.
+
+**Tool Call:** `wasm_call(path="C:/wasm/trig.wasm", export_name="hypot", args_json="[3.0, 4.0]")`
+
+**Return:** `{"ok": true, "path": "C:/wasm/trig.wasm", "export": "hypot", "result": 5.0}`
+
+**What happened:** The function computed sqrt(9 + 16) = 5.0. Floats work identically to integers in the JSON array.
+
+### Tutorial 4: Call a Void Function
+
+**Goal:** Call a function that writes to memory and returns nothing.
+
+**Tool Call:** `wasm_call(path="C:/wasm/store.wasm", export_name="store", args_json="[42]")`
+
+**Return:** `{"ok": true, "path": "C:/wasm/store.wasm", "export": "store", "result": null}`
+
+**What happened:** The function ran successfully but has no return value. `result` is `null`.
+
+### Tutorial 5: Handle Module Requiring Imports
+
+**Goal:** Inspect a WASI-dependent module.
+
+**Tool Call:** `wasm_inspect(path="C:/wasm/wasi_hello.wasm")`
+
+**Return:**
+```json
+{
+  "ok": false,
+  "error": "module requires at least 1 import",
+  "exports": [], "imports": ["Module requires imports..."]
+}
+```
+
+**What happened:** The module requires WASI host imports. wasm-mcp provides none. Use a self-contained module instead.
+
+### Tutorial 6: Export Not Found Error
+
+**Tool Call:** `wasm_call(path="C:/wasm/math.wasm", export_name="nonexistent")`
+
+**Return:** `{"ok": false, "error": "Export not found: nonexistent. Available: ['add', 'subtract', 'multiply', 'memory']", "result": null}`
+
+The error lists all valid exports so you can correct the call.
+
+### Tutorial 7: Run with _start Entry
+
+**Tool Call:** `wasm_run(path="C:/wasm/hello.wasm")`
+
+**Return:** `{"ok": true, "path": "C:/wasm/hello.wasm", "export": "_start", "result": null}`
+
+The WASI-style `_start` entry point was called successfully.
+
+### Tutorial 8: Run with Custom Entry
+
+**Tool Call:** `wasm_run(path="C:/wasm/calc.wasm", entry_export="main", args_json="[0]")`
+
+**Return:** `{"ok": true, "result": 0}`
+
+The `main` function returned 0 (success exit code).
+
+### Tutorial 9: Invalid JSON Args
+
+**Tool Call:** `wasm_call(path="C:/wasm/math.wasm", export_name="add", args_json="[1, two]")`
+
+**Return:** `{"ok": false, "error": "Invalid args JSON: Expecting value line 1 column 5"}`
+
+"two" is not valid JSON. Use numeric literals only.
+
+### Tutorial 10: Multi-Value Return
+
+**Tool Call:** `wasm_call(path="C:/wasm/multi.wasm", export_name="divide", args_json="[10, 3]")`
+
+**Return:** `{"ok": true, "result": [3, 1]}`
+
+The function returned both quotient (3) and remainder (1) as a tuple, converted to an array.
+
+### Tutorial 11: Multiple Arguments
+
+**Tool Call:** `wasm_call(path="C:/wasm/vector.wasm", export_name="dot", args_json="[1, 2, 3, 4, 5]")`
+
+**Return:** `{"ok": true, "result": 26}`
+
+Five numeric arguments passed and processed by the function.
+
+### Tutorial 12: Runtime Trap
+
+**Tool Call:** `wasm_call(path="C:/wasm/math.wasm", export_name="divide", args_json="[5, 0]")`
+
+**Return:** `{"ok": false, "error": "wasm trap: wasm `unreachable` instruction executed"}`
+
+Division by zero triggers a WASM trap. Wasmtime catches it safely.
+
+---
+
+## Troubleshooting
+
+1. **File not found:** Use absolute paths for reliability.
+2. **Module requires imports:** Use self-contained modules without WASI dependencies.
+3. **Export not found:** Run `wasm_inspect` first to discover valid names.
+4. **Invalid JSON args:** Ensure args_json is valid JSON containing only numbers.
+5. **WASM trap:** The function hit a runtime error. Check argument validity.
+6. **Multi-value confusion:** WASM multi-value returns appear as arrays. Single elements are not wrapped.
+
+## FAQ
+
+1. **What runtime?** Wasmtime via `wasmtime-py`.
+2. **Can I use WASI?** No — no imports are provided.
+3. **File formats?** `.wasm` (binary) and `.wat` (text).
+4. **String arguments?** Not supported directly — WASM functions use numeric types only.
+5. **State persistence?** No — fresh Store and Instance on every call.
+6. **Memory inspection?** Not supported via current tools.
+7. **MCP clients?** Any supporting stdio or HTTP/SSE transport.
+8. **Compile WASM?** From C, Rust, Go, AssemblyScript targeting wasm32.
+
+## Detailed Tutorial Walkthroughs
+
+### Tutorial 1 Extended: Complete WASM Module Testing Session
+
+This extended walkthrough covers testing a WASM module end-to-end with error recovery and edge cases.
+
+**Setup:** Create a file `calculator.wat` with five exported functions: add, subtract, multiply, divide, and factorial.
+
+**Step 1 - Inspect:** Call `wasm_inspect(path="C:/wasm/calculator.wasm")` to discover exports. The tool returns 5 functions and 1 memory export. No imports required. Confirm `divide` exists for later testing.
+
+**Step 2 - Basic arithmetic:** Call `wasm_call(path="C:/wasm/calculator.wasm", export_name="add", args_json="[10, 20]")` — returns 30. Call `wasm_call(path="C:/wasm/calculator.wasm", export_name="multiply", args_json="[6, 7]")` — returns 42.
+
+**Step 3 - Factorial:** Call `wasm_call(path="C:/wasm/calculator.wasm", export_name="factorial", args_json="[5]")` — returns 120 (5!). Call with 0 — returns 1 (0! = 1, edge case). Call with 10 — returns 3628800.
+
+**Step 4 - Division by zero trap:** Call `wasm_call(path="C:/wasm/calculator.wasm", export_name="divide", args_json="[10, 0]")` — returns `{"ok": false, "error": "wasm trap: wasm `unreachable` instruction executed", "result": null}`. The server handles the trap gracefully.
+
+**Step 5 - Typo recovery:** Call `wasm_call(path="C:/wasm/calculator.wasm", export_name="subtract", args_json="[10, 3]")` — wait, the export is "subtract" not "substract". Call with typo: `wasm_call(path="C:/wasm/calculator.wasm", export_name="substract", args_json="[10, 3]")` — returns error listing available exports. Correct the typo, retry with "subtract" — returns 7.
+
+**Step 6 - Invalid JSON:** Call `wasm_call(path="C:/wasm/calculator.wasm", export_name="add", args_json="[5, three"]` — returns JSON parse error with position. Correct to `"[5, 3]"`.
+
+**Step 7 - Run with _start:** If calculator.wasm has a _start entry, call `wasm_run(path="C:/wasm/calculator.wasm")`. Otherwise, wasm_run defaults to _start and may fail with export not found — demonstrating why wasm_inspect should always be called first.
+
+**Step 8 - Run with main entry:** `wasm_run(path="C:/wasm/calculator.wasm", entry_export="main", args_json="[0]")` if the module exports main.
+
+### Tutorial: Testing a WAT Module Without Compilation
+
+WAT files work directly: `wasm_inspect(path="C:/wasm/test.wat")`. Wasmtime automatically parses the text format. This is useful for iterating on module design without a build step.
+
+### Tutorial: WASM Module Edge Cases
+
+**Empty module:** A WASM module with no exports will return `"exports": []` from wasm_inspect. Calling wasm_call on any name will fail with export not found.
+
+**Module with only memory:** Some WASM modules export only memory and globals with no functions. wasm_inspect will show these, but wasm_call will have nothing to call.
+
+**Module with only table exports:** Rare but possible. wasm_inspect lists them as kind "Table". Not callable via wasm_call.
+
+**Large argument count:** Some WASM functions accept up to several dozen i32 arguments. The JSON array must contain exactly the right number. Passion `"[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]"` for a 16-argument function.
+
+## Advanced Usage Patterns
+
+### Chaining wasm_inspect + wasm_call
+
+Always chain these tools: inspect first to discover exports, then call the discovered export. This pattern handles any WASM module without prior knowledge of its interface.
+
+### Testing Multiple WASM Functions
+
+For modules with many exports, call each function with representative inputs and verify the results. This serves as a quick smoke test for the module.
+
+### Debugging WASM Modules
+
+Use `wasm_inspect` to verify the module loaded correctly. If instantiation fails, the module requires imports that wasm-mcp does not provide. If a function call traps, the arguments may be out of valid range — try edge cases like zero, one, and boundary values.
+
+## Advanced Error Recovery Walkthrough
+
+When wasm_call returns `ok: false`, examine the `error` field to determine the next action:
+
+1. **"WASM file not found"**: The path is wrong. Provide an absolute path to the module. Verify the file extension (should be `.wasm` or `.wat`).
+2. **"module requires at least 1 import"**: The module depends on external functions. Self-contained modules work best. To check if a module has imports before buying/downloading, read its documentation for WASI or host function requirements.
+3. **"Export not found"**: The function name is misspelled or the module uses different names. Run `wasm_inspect` first and use the exact names from its output. Common alternative names: `_start` vs `main`, `add` vs `sum`, `run` vs `execute`.
+4. **"Invalid args JSON"**: The JSON is malformed. Use a JSON validator to check. Common mistakes: using single quotes, trailing commas, non-numeric values like `true` or `"hello"`.
+5. **"wasm trap"**: The function itself crashed. This is usually a logic error in the WASM code, not in wasm-mcp. Common causes: division by zero, out-of-bounds memory access, assertion failure.
+
+## Performance Optimization
+
+Each wasm_call loads and compiles the module from disk. For small modules (<100KB), this takes under 50ms. For large modules (>1MB), expect 200-500ms per call. If you need to call the same module repeatedly, consider combining all calls into a single export that accepts an operation code and multiple arguments. The WASM module itself can maintain state internally within a single invocation.
+
+## WASM Module Size Guide
+
+| Module Purpose | Typical Size | Example |
+|---------------|-------------|---------|
+| Math utility (add, multiply) | 500 bytes - 5 KB | calculator.wasm |
+| Data processing | 5 KB - 50 KB | json_parser.wasm |
+| Game logic | 50 KB - 500 KB | physics_engine.wasm |
+| Image processing | 100 KB - 2 MB | image_filter.wasm |
+| Full application | 1 MB - 10 MB | raytracer.wasm |
+
+## Working with WAT Text Format Examples
+
+Create `math_test.wat` to practice:
+```wat
+(module
+  (func $add (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add)
+  (func $double (param i32) (result i32)
+    local.get 0
+    i32.const 2
+    i32.mul)
+  (export "add" (func $add))
+  (export "double" (func $double))
+)
+```
+
+Test with: `wasm_inspect(path="math_test.wat")` to see both exports. Then `wasm_call(path="math_test.wat", export_name="double", args_json="[21]")` returns 42.
+
+## Integrate with Other MCP Tools
+
+The output from wasm-mcp can be consumed by other MCP tools. For example:
+- A code generation tool produces WASM bytecode, which is then tested with wasm-mcp
+- A benchmarking tool calls wasm_call repeatedly with different inputs and aggregates the results
+- A documentation tool calls wasm_inspect to automatically document a module's API
+
+## Build Pipeline for Custom WASM Modules
+
+Create a build script `build_wasm.ps1`:
+```powershell
+$ErrorActionPreference = "Stop"
+# Rust
+rustc --target wasm32-unknown-unknown -O -o target/rust_module.wasm src/lib.rs
+# C
+clang --target=wasm32-unknown-unknown -nostdlib -Wl,--export-all -o target/c_module.wasm src/module.c
+Write-Host "WASM modules built to target/"
+```
+
+## Common Workflows
+
+**Testing a mathematical module:** Inspect, test each function with normal values, test with edge cases (0, negative, large), test with invalid arguments to verify error handling.
+
+**Testing a game logic module:** Load the module, call initialization, call update/render functions with game state, verify results match expected behavior.
+
+**Testing a data processing module:** Load the module, call processing functions with pointer+length arguments (just pass numeric pointers), verify return codes.
+
+## WASM Module Compatibility Quick Reference
+
+| Source Language | Compatible | Notes |
+|----------------|-----------|-------|
+| Rust (no_std) | Yes | Best choice, minimal imports |
+| Rust (std) | Maybe | May require WASI or panic handler imports |
+| C (Clang, no libc) | Yes | Use -nostdlib |
+| C (Clang, full libc) | No | Requires WASI |
+| AssemblyScript | Maybe | Depends on runtime imports |
+| Go | No | Requires JavaScript runtime |
+| C++ (no std) | Yes | With extern "C" wrappers |
+| WAT (hand-written) | Yes | No imports needed |
+
+## Testing Guide
+
+Run the full test suite with: `uv run pytest tests/ -q -v`
+
+This tests all tool error paths: file not found, invalid JSON, export not found, module requiring imports, runtime traps, and successful execution with various argument types.
+
+## Performance Notes
+
+Wasmtime compiles WASM modules to native code on first load. The compilation is fast (typically under 100ms for small modules). Each `wasm_call` or `wasm_run` invocation reloads the module from disk and re-instantiates it, which adds overhead. For performance-critical use, consider batching multiple function calls into a single WASM module rather than making repeated tool calls.
+
+## Detailed Walking Through Error Handling
+
+### Error Scenario: File Not Found
+`powershell
+wasm_inspect(path="C:/nonexistent.wasm")
+# Returns: {"ok": false, "error": "WASM file not found: C:/nonexistent.wasm", "exports": [], "imports": []}
+`
+This error occurs when the file does not exist at the specified path. Always use absolute paths and verify the file exists before calling wasm tools. Relative paths are resolved relative to the server's working directory, which may differ from your expected location.
+
+### Error Scenario: Export Not Found with Corrected Retry
+`powershell
+wasm_call(path="C:/wasm/math.wasm", export_name="ad", args_json="[1, 2]")
+# Returns: {"ok": false, "error": "Export not found: ad. Available: ['add', 'subtract', 'multiply', 'memory']", "result": null}
+# Corrected call:
+wasm_call(path="C:/wasm/math.wasm", export_name="add", args_json="[1, 2]")
+# Returns: {"ok": true, "result": 3}
+`
+
+### Error Scenario: Module Requires Imports
+`powershell
+wasm_inspect(path="C:/wasm/wasi_hello.wasm")
+# Returns: {"ok": false, "error": "module requires at least 1 import", "exports": [], "imports": [...], "result": null}
+`
+This typically happens with modules compiled for WASI or that import JavaScript functions. Self-contained modules compiled without external dependencies work. To check before inspecting, verify the module's documentation for import requirements.
+
+## Testing Multiple Functions in One Session
+
+For a math module with functions dd, sub, mul, div, pow, sqrt, log, sin, cos, tan:
+1. Call wasm_inspect to confirm all 10 exports exist
+2. Call each function with representative inputs
+3. Verify results match manual calculations
+4. Test edge cases: zero, one, negative numbers, large numbers
+5. Test error cases: division by zero, sqrt of negative, log of zero
+
+This systematic approach ensures the module works correctly before integrating it into larger workflows.
+
+## Using wasm-run for Module Testing
+
+wasm_run is designed for modules that follow the _start convention for initialization. Some modules use _start to initialize internal state, allocate memory, or set default values. Even if _start returns null (void), calling it ensures the module is properly initialized before other calls. After wasm_run, use wasm_call for subsequent function invocations. Note that each wasm_call creates a fresh instance, so _start must be called again or the module must store state in its own persistent storage.
+
+## Working with WAT Format
+
+The WAT (WebAssembly Text Format) is the human-readable representation of WASM. wasm-mcp supports WAT files natively because Wasmtime includes a WAT parser. Create a .wat file, pass its path to any wasm tool, and it works identically to .wasm. This is useful for:
+- Learning WASM concepts without compilation
+- Creating quick test modules
+- Debugging module behavior
+- Prototyping module interfaces
+
+Example: Create 	est.wat, call wasm_inspect(path="test.wat"), iterate on the WAT content, re-call wasm_inspect to see changes, without any build step.
+
+## Full WASM Module Lifecycle
+
+The complete lifecycle for using a WASM module with wasm-mcp:
+
+1. Obtain a .wasm file (compile, download, or write WAT)
+2. Call wasm_inspect to verify the module loads and see its exports
+3. Check that imports is empty (module is self-contained)
+4. Note the export names and kinds
+5. For each Func export, call wasm_call with appropriate numeric arguments
+6. Verify the results
+7. If the module has a _start or main entry point, use wasm_run for convenience
+8. Handle errors gracefully by checking the ok field
+9. Use error messages to guide retry with corrected parameters

@@ -1,0 +1,198 @@
+# wasm-mcp — MCP Server Capabilities
+
+**Server:** wasm-mcp v0.1.0
+**Description:** FastMCP server for WebAssembly sandbox execution. Loads `.wasm` and `.wat` files from the local filesystem, inspects their exports and imports, calls exported functions with numeric arguments, and returns structured results.
+
+---
+
+## Architecture Overview
+
+wasm-mcp uses the **Wasmtime** runtime (via the `wasmtime-py` Python package) to provide a sandboxed WebAssembly execution environment. Each tool invocation creates a fresh `Store` and `Instance`, ensuring complete isolation between calls. No state persists between invocations.
+
+**Key design decisions:**
+- No host functions are provided to WASM modules. Modules requiring imports will fail with a descriptive error.
+- Arguments are passed as JSON arrays of numbers (i32, i64, f32, f64).
+- Results are returned as Python primitives (int, float, list, None).
+- All file paths are resolved from the current working directory. Absolute paths are also supported.
+- The server runs in stdio mode by default (compatible with Claude Desktop). HTTP mode is available via `MCP_TRANSPORT=http`.
+
+**Security model:**
+- Wasmtime provides strong sandboxing: no filesystem, network, or OS access unless explicitly configured (not configured by default).
+- File access is restricted to paths specified by the caller. No path traversal checking beyond what Wasmtime provides.
+- Execution time is bounded by Wasmtime's default limits (not configurable via the MCP tool parameters).
+
+---
+
+## Tool Reference
+
+### 1. wasm_inspect
+
+**Purpose:** Inspect a WebAssembly module file to discover its exports and import requirements without executing any code. Use this to understand what a `.wasm` module exposes before trying to call it.
+
+**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | `str` | Yes | — | Filesystem path to a `.wasm` or `.wat` file. Can be relative or absolute. |
+
+**Return Format (success with instantiation):**
+```json
+{
+  "ok": true,
+  "path": "C:/modules/add.wasm",
+  "exports": [
+    {"name": "add", "kind": "Func"},
+    {"name": "memory", "kind": "Memory"},
+    {"name": "__data_end", "kind": "Global"}
+  ],
+  "imports": []
+}
+```
+
+**Return Format (module requires imports):**
+```json
+{
+  "ok": false,
+  "error": "module requires at least 1 import",
+  "exports": [],
+  "imports": ["Module requires imports; list not available without instantiating."]
+}
+```
+
+**Return Format (file not found):**
+```json
+{
+  "ok": false,
+  "error": "WASM file not found: C:/nonexistent.wasm",
+  "exports": [],
+  "imports": []
+}
+```
+
+**Notes:**
+- The tool first attempts to instantiate the module with no imports. If instantiation succeeds, exports are fully listed.
+- If instantiation fails (module requires imports), `ok` is `false` and the error message describes the issue.
+- Export kinds include: `Func`, `Memory`, `Global`, `Table`.
+
+---
+
+### 2. wasm_call
+
+**Purpose:** Load a WASM module, instantiate it, call a named exported function, and return the result. The module is freshly loaded and instantiated on each call — no state is shared between calls.
+
+**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | `str` | Yes | — | Filesystem path to the `.wasm` file. |
+| `export_name` | `str` | Yes | — | Name of the exported function to call. Use `wasm_inspect` first to discover valid export names. |
+| `args_json` | `str` | No | `"[]"` | JSON-encoded array of numeric arguments, e.g. `"[1, 2]"` for two integers, `"[3.14]"` for a float. |
+
+**Return Format:**
+```json
+{
+  "ok": true,
+  "path": "C:/modules/add.wasm",
+  "export": "add",
+  "result": 3
+}
+```
+
+**Return Format (function returns multiple values):**
+```json
+{
+  "ok": true,
+  "path": "C:/modules/swap.wasm",
+  "export": "swap",
+  "result": [2, 1]
+}
+```
+
+**Return Format (void function):**
+```json
+{
+  "ok": true,
+  "path": "C:/modules/store.wasm",
+  "export": "store",
+  "result": null
+}
+```
+
+**Error Formats:**
+```json
+{
+  "ok": false,
+  "error": "WASM file not found: C:/no_file.wasm",
+  "result": null
+}
+```
+```json
+{
+  "ok": false,
+  "error": "Export not found: addd. Available: ['add', 'memory', '__data_end']",
+  "result": null
+}
+```
+```json
+{
+  "ok": false,
+  "error": "Invalid args JSON: Expecting value: line 1 column 2 (char 1)",
+  "result": null
+}
+```
+
+**Common Errors:**
+- **File not found:** The path does not point to an existing WASM file.
+- **Export not found:** The named export does not exist (check with `wasm_inspect`).
+- **Invalid args JSON:** The `args_json` string is not valid JSON (not an array, or contains non-numeric values).
+- **Module requires imports:** The WASM module requires host-provided imports. wasm-mcp does not provide any host functions.
+- **Runtime trap:** The WASM function encountered an error during execution (e.g., division by zero, out-of-bounds memory access).
+
+---
+
+### 3. wasm_run
+
+**Purpose:** Convenience wrapper around `wasm_call` specifically for running WASM modules with a conventional entry point. Calls the named export (default `_start`) to run the module.
+
+**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | `str` | Yes | — | Filesystem path to the `.wasm` file. |
+| `entry_export` | `str` | No | `"_start"` | Name of the entry point export to call. Common values: `"_start"` (WASI convention), `"main"`, `"run"`. |
+| `args_json` | `str` | No | `"[]"` | JSON-encoded array of numeric arguments. |
+
+**Return Format:**
+```json
+{
+  "ok": true,
+  "path": "C:/modules/hello.wasm",
+  "export": "_start",
+  "result": null
+}
+```
+
+**Errors:**
+Identical error format to `wasm_call`. Specific errors:
+- `_start` not found if the module uses a different convention (try `wasm_inspect` to discover the actual export name).
+- Runtime trap if the module tries to use WASI (WebAssembly System Interface) — wasm-mcp does not provide WASI support.
+
+---
+
+## Configuration & Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_TRANSPORT` | `"stdio"` | Transport mode. Set to `"http"` for HTTP/SSE transport. |
+
+No other environment variables are required or consumed.
+
+## Security & Privacy
+
+- **Sandboxed execution:** All WASM code runs inside the Wasmtime runtime, which provides strong isolation. No filesystem, network, or OS calls are permitted unless explicitly configured.
+- **No data exfiltration:** WASM modules cannot access the network or filesystem. Results are returned only to the calling MCP client.
+- **No persistence:** Each tool invocation creates a fresh Wasmtime `Store` and `Instance`. No state is shared between calls.
+- **File access:** The server reads `.wasm` files from the local filesystem based on the caller-provided path. There is no path whitelist — any accessible file can be loaded.
+
+## Integration Points
+
+- **Wasmtime:** The sole WASM runtime. Supports WASM MVP plus many post-MVP proposals (bulk memory, reference types, SIMD, etc.).
+- **Standard MCP transport:** Compatible with any MCP client supporting stdio or HTTP/SSE transport.
+- **File system:** Loads `.wasm` and `.wat` files from any path the server process can read.

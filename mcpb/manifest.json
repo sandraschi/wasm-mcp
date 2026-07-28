@@ -1,0 +1,24 @@
+{
+  "manifest_version": "0.2",
+  "name": "wasm-mcp",
+  "version": "0.1.0",
+  "description": "FastMCP server for WebAssembly sandbox execution (instantiate, call exports, inspect modules)",
+  "author": { "name": "Sandra Schi" },
+  "server": {
+    "type": "python",
+    "entry_point": "src/wasm_mcp/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run","--directory","${PWD}","python","-m","wasm_mcp"],
+      "env": {
+        "PYTHONPATH": "${PWD}/src",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  },
+  "tools": [
+    { "name": "wasm_inspect", "description": "wasm_inspect" },
+    { "name": "wasm_call", "description": "wasm_call" },
+    { "name": "wasm_run", "description": "wasm_run" }
+  ]
+}
