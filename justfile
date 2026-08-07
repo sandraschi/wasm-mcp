@@ -15,3 +15,9 @@ fix:
 	Set-Location '{{justfile_directory()}}'
 	uv run ruff check . --fix
 	uv run ruff format .
+
+# Bootstrap: install dev deps + pre-commit hook
+bootstrap:
+    uv sync --group dev
+    uv run pre-commit install
+    Write-Host "Pre-commit hooks installed." -ForegroundColor Green
